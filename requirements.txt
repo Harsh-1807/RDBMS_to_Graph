@@ -1,0 +1,3 @@
+sqlalchemy==1.4.50
+neomodel==5.0.1
+psycopg2
