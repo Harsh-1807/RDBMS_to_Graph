@@ -1,9 +1,10 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { Graph3D } from './components/Graph3D'
 import neo4j from 'neo4j-driver'
 import { QueryInput } from './components/QueryInput'
 import { GraphControls } from './components/GraphControls'
 import { ResultTable } from './components/ResultTable'
+import { translateToCypher, clearConversationContext } from './nlp/CypherTranslator'
 
 // Neo4j connection details
 const NEO4J_URI = 'neo4j+s://3e3d0346.databases.neo4j.io'
@@ -16,64 +17,55 @@ function App() {
   const [error, setError] = useState(null)
   const [tableData, setTableData] = useState([])
   const [viewMode, setViewMode] = useState('graph') // 'graph' or 'table'
+  const [cypherQuery, setCypherQuery] = useState('') // Store generated Cypher query
+  const [queryIntent, setQueryIntent] = useState(null) // Store query understanding
+  const [selectedNode, setSelectedNode] = useState(null) // Add state for selected node details
+  const [relatedNodes, setRelatedNodes] = useState([]) // Add state for nodes related to selection
   const graphRef = useRef()
+  
+  // Clear conversation context on component mount
+  useEffect(() => {
+    clearConversationContext();
+  }, []);
 
   const nodeColors = {
-    Category: '#FF5733',
-    Product: '#33FF57',
-    Supplier: '#3357FF',
-    Customer: '#F033FF',
-    Employee: '#FF33A8',
-    Order: '#33FFF5',
-    OrderDetail: '#FFD133',
-    Shipper: '#B533FF'
-  }
-
-  // Function to convert natural language to Cypher query
-  // This is a simplified version. In a real app, you might use an AI service
-  const naturalLanguageToCypher = (nlQuery) => {
-    // Simple pattern matching for common queries
-    const nlQueryLower = nlQuery.toLowerCase()
-    
-    if (nlQueryLower.includes('all products')) {
-      return 'MATCH (p:Product) RETURN p LIMIT 100'
-    }
-    if (nlQueryLower.includes('all categories')) {
-      return 'MATCH (c:Category) RETURN c LIMIT 100'
-    }
-    if (nlQueryLower.includes('all customers')) {
-      return 'MATCH (c:Customer) RETURN c LIMIT 100'
-    }
-    if (nlQueryLower.includes('all suppliers')) {
-      return 'MATCH (s:Supplier) RETURN s LIMIT 100'
-    }
-    if (nlQueryLower.includes('products in category')) {
-      const categoryMatch = nlQuery.match(/in category\s+['"]?([^'"]+)['"]?/i)
-      const categoryName = categoryMatch ? categoryMatch[1] : 'Beverages' // Default if no category specified
-      return `MATCH (c:Category {category_name: "${categoryName}"})-[:CONTAINS]->(p:Product) RETURN c, p`
-    }
-    if (nlQueryLower.includes('customer orders')) {
-      const customerMatch = nlQuery.match(/customer\s+['"]?([^'"]+)['"]?/i)
-      const customerId = customerMatch ? customerMatch[1] : 'ALFKI' // Default if no customer specified
-      return `MATCH (c:Customer {customer_id: "${customerId}"})-[:PLACED]->(o:Order) RETURN c, o`
-    }
-    if (nlQueryLower.includes('order details')) {
-      const orderMatch = nlQuery.match(/order\s+(\d+)/i)
-      const orderId = orderMatch ? parseInt(orderMatch[1]) : 10248 // Default if no order specified
-      return `MATCH (o:Order {order_id: ${orderId}})-[:HAS]->(od:OrderDetail)-[:CONTAINS]->(p:Product) RETURN o, od, p`
-    }
-    
-    // Default query if no patterns match
-    return 'MATCH (n) RETURN n LIMIT 25'
+    Category: '#FF9671',
+    Product: '#00D2FC',
+    Supplier: '#D65DB1',
+    Customer: '#91E25A',
+    Employee: '#FFC75F',
+    Order: '#845EC2',
+    OrderDetail: '#0089BA',
+    Shipper: '#C34A36'
   }
 
   const executeQuery = useCallback(async (nlQuery) => {
     setLoading(true)
     setError(null)
+    // Clear any previously selected node when running a new query
+    setSelectedNode(null)
+    setRelatedNodes([])
+    
+    // Clear conversation context for new topic
+    if (nlQuery.toLowerCase().includes('start over') || 
+        nlQuery.toLowerCase().includes('reset') || 
+        nlQuery.toLowerCase().includes('new topic')) {
+      clearConversationContext();
+      setError("Conversation reset. Please try a new query.");
+      setLoading(false);
+      return;
+    }
     
     try {
-      const cypherQuery = naturalLanguageToCypher(nlQuery)
-      console.log('Executing Cypher query:', cypherQuery)
+      // Use our semantic translator with Mistral
+      // translateToCypher is now async so we need to await it
+      const generatedCypherQuery = await translateToCypher(nlQuery);
+      
+      setCypherQuery(generatedCypherQuery) // Store the generated Cypher query
+      console.log('Executing Cypher query:', generatedCypherQuery)
+      
+      // Store and display query understanding
+      captureQueryIntent(nlQuery);
       
       const driver = neo4j.driver(
         NEO4J_URI, 
@@ -83,7 +75,7 @@ function App() {
       const session = driver.session()
       
       try {
-        const result = await session.run(cypherQuery)
+        const result = await session.run(generatedCypherQuery)
         
         // Process results for graph visualization
         const nodes = new Map()
@@ -93,53 +85,70 @@ function App() {
         result.records.forEach(record => {
           record.forEach(value => {
             if (neo4j.isNode(value)) {
-              if (!nodes.has(value.identity.toString())) {
+              // Make sure value and value.identity are defined before calling toString()
+              if (value && value.identity && !nodes.has(value.identity.toString())) {
                 nodes.set(value.identity.toString(), {
                   id: value.identity.toString(),
-                  label: value.labels[0],
-                  properties: value.properties,
-                  color: nodeColors[value.labels[0]] || '#CCCCCC'
+                  label: value.labels && value.labels.length > 0 ? value.labels[0] : 'Unknown',
+                  properties: value.properties || {},
+                  color: value.labels && value.labels.length > 0 ? (nodeColors[value.labels[0]] || '#CCCCCC') : '#CCCCCC'
                 })
               }
             } else if (neo4j.isRelationship(value)) {
-              links.push({
-                source: value.startNodeIdentity.toString(),
-                target: value.endNodeIdentity.toString(),
-                label: value.type,
-                properties: value.properties
-              })
-            } else if (value instanceof neo4j.Path) {
-              // Handle paths
-              value.segments.forEach(segment => {
-                const startNode = segment.start
-                const endNode = segment.end
-                const relationship = segment.relationship
-                
-                if (!nodes.has(startNode.identity.toString())) {
-                  nodes.set(startNode.identity.toString(), {
-                    id: startNode.identity.toString(),
-                    label: startNode.labels[0],
-                    properties: startNode.properties,
-                    color: nodeColors[startNode.labels[0]] || '#CCCCCC'
-                  })
-                }
-                
-                if (!nodes.has(endNode.identity.toString())) {
-                  nodes.set(endNode.identity.toString(), {
-                    id: endNode.identity.toString(),
-                    label: endNode.labels[0],
-                    properties: endNode.properties,
-                    color: nodeColors[endNode.labels[0]] || '#CCCCCC'
-                  })
-                }
-                
+              // Only process relationships if all required properties exist
+              if (value && value.startNodeIdentity && value.endNodeIdentity) {
                 links.push({
-                  source: startNode.identity.toString(),
-                  target: endNode.identity.toString(),
-                  label: relationship.type,
-                  properties: relationship.properties
+                  source: value.startNodeIdentity.toString(),
+                  target: value.endNodeIdentity.toString(),
+                  label: value.type || 'Unknown',
+                  properties: value.properties || {}
                 })
-              })
+              }
+            } else if (value instanceof neo4j.Path) {
+              // Handle paths with added safety checks
+              if (value && value.segments) {
+                value.segments.forEach(segment => {
+                  if (!segment || !segment.start || !segment.end || !segment.relationship) {
+                    return; // Skip invalid segments
+                  }
+                  
+                  const startNode = segment.start
+                  const endNode = segment.end
+                  const relationship = segment.relationship
+                  
+                  // Make sure start node has valid identity and data
+                  if (startNode.identity && !nodes.has(startNode.identity.toString())) {
+                    nodes.set(startNode.identity.toString(), {
+                      id: startNode.identity.toString(),
+                      label: startNode.labels && startNode.labels.length > 0 ? startNode.labels[0] : 'Unknown',
+                      properties: startNode.properties || {},
+                      color: startNode.labels && startNode.labels.length > 0 ? 
+                          (nodeColors[startNode.labels[0]] || '#CCCCCC') : '#CCCCCC'
+                    })
+                  }
+                  
+                  // Make sure end node has valid identity and data
+                  if (endNode.identity && !nodes.has(endNode.identity.toString())) {
+                    nodes.set(endNode.identity.toString(), {
+                      id: endNode.identity.toString(),
+                      label: endNode.labels && endNode.labels.length > 0 ? endNode.labels[0] : 'Unknown',
+                      properties: endNode.properties || {},
+                      color: endNode.labels && endNode.labels.length > 0 ? 
+                          (nodeColors[endNode.labels[0]] || '#CCCCCC') : '#CCCCCC'
+                    })
+                  }
+                  
+                  // Only add links if both nodes have valid identities
+                  if (startNode.identity && endNode.identity) {
+                    links.push({
+                      source: startNode.identity.toString(),
+                      target: endNode.identity.toString(),
+                      label: relationship.type || 'Unknown',
+                      properties: relationship.properties || {}
+                    })
+                  }
+                })
+              }
             }
           })
         })
@@ -155,10 +164,23 @@ function App() {
           const row = {}
           record.keys.forEach(key => {
             const value = record.get(key)
-            if (neo4j.isNode(value)) {
-              row[key] = `${value.labels[0]}: ${JSON.stringify(value.properties)}`
+            if (value === null || value === undefined) {
+              row[key] = 'N/A'; // Handle null values
+            } else if (neo4j.isNode(value)) {
+              if (value.labels && value.labels.length > 0) {
+                row[key] = `${value.labels[0]}: ${JSON.stringify(value.properties || {})}`
+              } else {
+                row[key] = `Node: ${JSON.stringify(value.properties || {})}`
+              }
             } else if (neo4j.isRelationship(value)) {
-              row[key] = `${value.type}: ${JSON.stringify(value.properties)}`
+              row[key] = `${value.type || 'Relationship'}: ${JSON.stringify(value.properties || {})}`
+            } else if (typeof value === 'object') {
+              // Handle other complex objects
+              try {
+                row[key] = JSON.stringify(value)
+              } catch (e) {
+                row[key] = 'Complex Value'
+              }
             } else {
               row[key] = value
             }
@@ -179,172 +201,290 @@ function App() {
     }
   }, [])
 
-  const handleNodeClick = useCallback(node => {
+  const handleNodeClick = useCallback(async (node) => {
     console.log('Node clicked:', node)
-    alert(`Node: ${node.label}\nProperties: ${JSON.stringify(node.properties, null, 2)}`)
+    setSelectedNode(node)
+    
+    // Fetch related nodes for the selected node
+    try {
+      const driver = neo4j.driver(
+        NEO4J_URI, 
+        neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD)
+      )
+      
+      const session = driver.session()
+      
+      // Construct a query to find related nodes based on node type
+      let relationshipQuery
+      if (node.label === 'Product') {
+        relationshipQuery = `MATCH (p:Product {product_id: ${node.properties.product_id}})-[r]-(related)
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      } else if (node.label === 'Category') {
+        relationshipQuery = `MATCH (c:Category {category_id: ${node.properties.category_id}})-[r]-(related)
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      } else if (node.label === 'Customer') {
+        relationshipQuery = `MATCH (c:Customer {customer_id: "${node.properties.customer_id}"})-[r]-(related)
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      } else if (node.label === 'Order') {
+        relationshipQuery = `MATCH (o:Order {order_id: ${node.properties.order_id}})-[r]-(related)
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      } else if (node.label === 'Supplier') {
+        relationshipQuery = `MATCH (s:Supplier {supplier_id: ${node.properties.supplier_id}})-[r]-(related)
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      } else if (node.label === 'Employee') {
+        relationshipQuery = `MATCH (e:Employee {employee_id: ${node.properties.employee_id}})-[r]-(related)
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      } else {
+        relationshipQuery = `MATCH (n)-[r]-(related) 
+                            WHERE ID(n) = ${node.id}
+                            RETURN type(r) AS relationship, labels(related)[0] AS nodeType, 
+                            COUNT(related) AS count
+                            ORDER BY count DESC`
+      }
+      
+      try {
+        const result = await session.run(relationshipQuery)
+        
+        const relationships = result.records.map(record => ({
+          relationship: record.get('relationship'),
+          nodeType: record.get('nodeType'),
+          count: record.get('count').toNumber()
+        }))
+        
+        setRelatedNodes(relationships)
+      } catch (err) {
+        console.error('Error fetching related nodes:', err)
+      } finally {
+        await session.close()
+        await driver.close()
+      }
+    } catch (err) {
+      console.error('Error establishing database connection:', err)
+    }
   }, [])
 
-  const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
-    const label = node.label
-    const fontSize = 12/globalScale
-    ctx.font = `${fontSize}px Sans-Serif`
-    
-    // Node circle
-    ctx.beginPath()
-    ctx.arc(node.x, node.y, 5, 0, 2 * Math.PI, false)
-    ctx.fillStyle = node.color || '#CCCCCC'
-    ctx.fill()
-    
-    // Node label
-    const textWidth = ctx.measureText(label).width
-    const bckgDimensions = [textWidth, fontSize].map(n => n + fontSize * 0.2)
-    
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
-    ctx.fillRect(
-      node.x - bckgDimensions[0] / 2,
-      node.y - bckgDimensions[1] / 2 - 10,
-      bckgDimensions[0],
-      bckgDimensions[1]
-    )
-    
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillStyle = 'white'
-    ctx.fillText(label, node.x, node.y - 10)
-    
-    // Property display for primary property (e.g., name)
-    let primaryProperty = ''
-    if (node.properties) {
-      if (node.properties.name) {
-        primaryProperty = node.properties.name
-      } else if (node.properties.product_name) {
-        primaryProperty = node.properties.product_name
-      } else if (node.properties.company_name) {
-        primaryProperty = node.properties.company_name
-      } else if (node.properties.category_name) {
-        primaryProperty = node.properties.category_name
-      } else if (node.properties.customer_id) {
-        primaryProperty = node.properties.customer_id
+  const captureQueryIntent = (nlQuery) => {
+    setQueryIntent({
+      query: nlQuery,
+      timestamp: new Date().toLocaleTimeString()
+    })
+  }
+
+  // Format property values for display
+  const formatPropertyValue = (value) => {
+    if (value === null || value === undefined) return 'N/A';
+    if (typeof value === 'number') {
+      // Format currency if it looks like a price
+      if (String(value).includes('.') && value < 10000) {
+        return `$${value.toFixed(2)}`;
+      }
+      return value.toString();
+    }
+    // Format date string if it's a date
+    if (typeof value === 'string' && value.match(/^\d{4}-\d{2}-\d{2}/)) {
+      try {
+        return new Date(value).toLocaleDateString();
+      } catch (e) {
+        return value;
       }
     }
-    
-    if (primaryProperty && globalScale > 0.5) {
-      const propTextWidth = ctx.measureText(primaryProperty).width
-      const propBckgDimensions = [propTextWidth, fontSize].map(n => n + fontSize * 0.2)
-      
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
-      ctx.fillRect(
-        node.x - propBckgDimensions[0] / 2,
-        node.y + propBckgDimensions[1] / 2,
-        propBckgDimensions[0],
-        propBckgDimensions[1]
-      )
-      
-      ctx.fillStyle = 'white'
-      ctx.fillText(primaryProperty, node.x, node.y + fontSize)
-    }
-  }, [])
+    return String(value);
+  }
 
-  const linkCanvasObject = useCallback((link, ctx) => {
-    // Draw link label at the middle of the link
-    if (link.label) {
-      const start = link.source
-      const end = link.target
-      
-      const fontSize = 4
-      ctx.font = `${fontSize}px Sans-Serif`
-      
-      const label = link.label
-      const textWidth = ctx.measureText(label).width
-      
-      const midX = start.x + (end.x - start.x) / 2
-      const midY = start.y + (end.y - start.y) / 2
-      
-      // Background for text
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
-      ctx.fillRect(
-        midX - textWidth / 2,
-        midY - fontSize / 2,
-        textWidth,
-        fontSize
-      )
-      
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillStyle = 'white'
-      ctx.fillText(label, midX, midY)
+  // Get a human-readable title for a node
+  const getNodeTitle = (node) => {
+    if (!node) return '';
+    
+    const props = node.properties;
+    
+    if (node.label === 'Product' && props.product_name) {
+      return props.product_name;
+    } else if (node.label === 'Category' && props.category_name) {
+      return props.category_name;
+    } else if (node.label === 'Supplier' && props.company_name) {
+      return props.company_name;
+    } else if (node.label === 'Customer' && props.company_name) {
+      return props.company_name;
+    } else if (node.label === 'Employee' && props.first_name && props.last_name) {
+      return `${props.first_name} ${props.last_name}`;
+    } else if (node.label === 'Order') {
+      return `Order #${props.order_id}`;
+    } else if (node.label === 'Shipper' && props.company_name) {
+      return props.company_name;
     }
-  }, [])
+    
+    return `${node.label} ${node.id}`;
+  }
+
+  // Handle click on a related node to run a new query
+  const handleRelatedNodeClick = (relationship, nodeType) => {
+    if (!selectedNode) return;
+    
+    let query = '';
+    const nodeTitle = getNodeTitle(selectedNode);
+    
+    if (relationship === 'CONTAINS' && nodeType === 'Product') {
+      query = `Show products in category ${nodeTitle}`;
+    } else if (relationship === 'SUPPLIES' && nodeType === 'Product') {
+      query = `Show products supplied by ${nodeTitle}`;
+    } else if (relationship === 'PLACED' && nodeType === 'Order') {
+      query = `Show orders placed by customer ${nodeTitle}`;
+    } else if (relationship === 'PROCESSED' && nodeType === 'Order') {
+      query = `Show orders processed by employee ${nodeTitle}`;
+    } else if (relationship === 'REPORTS_TO' && nodeType === 'Employee') {
+      query = `Show employee hierarchy for ${nodeTitle}`;
+    } else if (relationship === 'SHIPPED_VIA' && nodeType === 'Shipper') {
+      query = `Show orders shipped via ${nodeTitle}`;
+    } else {
+      query = `Show ${nodeType.toLowerCase()}s related to ${nodeTitle}`;
+    }
+    
+    executeQuery(query);
+  }
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-4">
-      <div className="container mx-auto">
-        <header className="mb-8">
-          <h1 className="text-3xl font-bold text-center">Northwind Graph Explorer</h1>
-          <p className="text-center text-gray-400">
-            Ask questions about the Northwind database in natural language
-          </p>
-        </header>
+    <div className="flex flex-col h-screen bg-gray-900 text-white">
+      <header className="bg-gray-800 p-4 shadow-lg">
+        <h1 className="text-xl font-semibold text-center">Neo4j Northwind Graph Explorer</h1>
+      </header>
+      
+      <div className="p-4">
+        <QueryInput onSubmit={executeQuery} />
         
-        <QueryInput onSubmit={executeQuery} loading={loading} />
-        
-        {error && (
-          <div className="p-4 mb-6 bg-red-800 text-white rounded">
-            <h3 className="font-bold">Error</h3>
-            <p>{error}</p>
+        {queryIntent && (
+          <div className="mt-2 text-sm text-gray-400">
+            <span className="font-medium">Query:</span> {queryIntent.query}
+            <span className="ml-2">({queryIntent.timestamp})</span>
           </div>
         )}
         
-        <GraphControls 
-          viewMode={viewMode} 
-          onViewModeChange={setViewMode} 
-        />
-        
-        {loading ? (
-          <div className="flex justify-center items-center h-96">
-            <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500"></div>
+        {cypherQuery && (
+          <div className="mt-1 text-sm font-mono bg-gray-800 p-2 rounded overflow-x-auto">
+            <span className="text-blue-400">Generated Cypher:</span> {cypherQuery}
           </div>
-        ) : (
-          <div className="bg-gray-800 rounded-lg shadow-lg overflow-hidden">
-            {viewMode === 'graph' && graphData.nodes.length > 0 ? (
-              <div className="h-[600px] relative">
-                <Graph3D
-                  data={graphData}
-                  onNodeClick={handleNodeClick}
-                />
-                <div className="absolute bottom-4 left-4 bg-gray-900 p-2 rounded opacity-80">
-                  <h3 className="font-bold mb-1">Legend</h3>
-                  <div className="grid grid-cols-2 gap-2">
-                    {Object.entries(nodeColors).map(([label, color]) => (
-                      <div key={label} className="flex items-center">
-                        <span 
-                          className="inline-block w-3 h-3 mr-1 rounded-full" 
-                          style={{ backgroundColor: color }}
-                        ></span>
-                        <span className="text-xs">{label}</span>
-                      </div>
+        )}
+      </div>
+      
+      {error ? (
+        <div className="p-4 m-4 bg-red-900 bg-opacity-30 text-red-200 rounded">
+          Error: {error}
+        </div>
+      ) : (
+        <div className="flex flex-1 overflow-hidden p-4">
+          <div className={`flex-1 relative transition-all duration-300 ${selectedNode ? 'mr-80' : ''}`}>
+            <GraphControls 
+              viewMode={viewMode} 
+              onViewModeChange={setViewMode}
+              nodeCount={graphData.nodes.length} 
+              relationshipCount={graphData.links.length} 
+            />
+            
+            {loading ? (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-70">
+                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+              </div>
+            ) : (
+              <>
+                {viewMode === 'graph' ? (
+                  <div className="h-full relative rounded-lg overflow-hidden bg-gray-950">
+                    <Graph3D 
+                      data={graphData} 
+                      onNodeClick={handleNodeClick}
+                    />
+                  </div>
+                ) : (
+                  <div className="h-full overflow-auto rounded-lg bg-gray-800">
+                    <ResultTable data={tableData} />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          
+          {/* Node details panel */}
+          {selectedNode && (
+            <div className="w-80 bg-gray-800 rounded-lg shadow-xl ml-4 p-4 overflow-y-auto flex flex-col h-full animate-slideIn">
+              <div className="mb-4 pb-2 border-b border-gray-700">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-xl font-bold">{getNodeTitle(selectedNode)}</h2>
+                  <button 
+                    onClick={() => setSelectedNode(null)} 
+                    className="text-gray-400 hover:text-white"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div 
+                  className="text-sm font-medium mt-1 px-2 py-1 rounded-full inline-block"
+                  style={{ backgroundColor: selectedNode.color || '#666', color: '#fff' }}
+                >
+                  {selectedNode.label}
+                </div>
+              </div>
+              
+              <div className="mb-4">
+                <h3 className="text-lg font-semibold mb-2 text-blue-300">Properties</h3>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {Object.entries(selectedNode.properties || {}).map(([key, value]) => (
+                      <tr key={key} className="border-b border-gray-700">
+                        <td className="py-2 pr-2 text-gray-400 font-medium">
+                          {key.replace(/_/g, ' ')}
+                        </td>
+                        <td className="py-2 text-right">{formatPropertyValue(value)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              {relatedNodes.length > 0 && (
+                <div className="mt-2">
+                  <h3 className="text-lg font-semibold mb-2 text-blue-300">Relationships</h3>
+                  <div className="space-y-2">
+                    {relatedNodes.map((rel, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleRelatedNodeClick(rel.relationship, rel.nodeType)}
+                        className="w-full text-left bg-gray-700 hover:bg-gray-600 p-2 rounded flex justify-between items-center transition"
+                      >
+                        <div>
+                          <span className="font-medium">{rel.nodeType}</span>
+                          <div className="text-xs text-gray-400">via {rel.relationship}</div>
+                        </div>
+                        <div className="bg-blue-500 text-white text-xs font-bold rounded-full px-2 py-1">
+                          {rel.count}
+                        </div>
+                      </button>
                     ))}
                   </div>
                 </div>
+              )}
+              
+              <div className="mt-auto pt-4 text-center">
+                <button
+                  onClick={() => executeQuery(`Find paths related to ${getNodeTitle(selectedNode)}`)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-full font-medium text-sm transition"
+                >
+                  Explore More Connections
+                </button>
               </div>
-            ) : viewMode === 'table' && tableData.length > 0 ? (
-              <ResultTable data={tableData} />
-            ) : (
-              <div className="flex justify-center items-center h-96 p-4">
-                <p className="text-gray-400 text-center">
-                  {graphData.nodes.length === 0 
-                    ? "No data to display. Try running a query above."
-                    : "Switch to table view to see tabular results."}
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-        
-        <div className="mt-8 text-gray-400 text-sm text-center">
-          <p>Example queries: "Show me all products", "Show products in category Beverages", "Show customer orders for ALFKI"</p>
+            </div>
+          )}
         </div>
-      </div>
+      )}
     </div>
   )
 }
