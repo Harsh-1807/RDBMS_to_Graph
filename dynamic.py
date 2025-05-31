@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Database connection strings
 POSTGRES_URLP = 'postgresql://postgres:123456788@localhost:5432/northwind'
-NEO4J_URL = 'neo4j+s://neo4j:u_K1KGM8AUAZnFYf_FpAnG3W5XYe9BUkLUvgebn4Dug@3e3d0346.databases.neo4j.io'
+NEO4J_URL = 'URL HERE'
 
 # Configure Neo4j connection
 config.DATABASE_URL = NEO4J_URL
