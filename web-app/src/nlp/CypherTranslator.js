@@ -14,7 +14,7 @@ let conversationContext = {
 };
 
 // Mistral API key
-const MISTRAL_API_KEY = 'jgYrXbBXIojY3iyRwLSeJFabctgOQK7j';
+const MISTRAL_API_KEY = 'API HERE';
 // Use Mistral Large model
 const MISTRAL_API_URL = 'https://api.mistral.ai/v1/chat/completions';
 
