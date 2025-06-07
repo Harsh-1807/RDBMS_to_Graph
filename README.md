@@ -25,7 +25,7 @@ pip install -r requirements.txt
 2. Configure the database connection strings in `migrate.py`:
 ```python
 POSTGRES_URL = 'postgresql://postgres:123456788@localhost:5432/northwind'
-NEO4J_URL = 'neo4j+s://neo4j:u_K1KGM8AUAZnFYf_FpAnG3W5XYe9BUkLUvgebn4Dug@3e3d0346.databases.neo4j.io'
+NEO4J_URL = 'neo4j+s://neo4j:u_K1KGM8AUAZnFYf_FpAnG3WYe9BUkLUvgebn4Dug@3e3d0346.databases.neo4j.io'
 ```
 
 ### Running the Migration
