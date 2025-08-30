@@ -109,3 +109,9 @@ Update the database connection details in:
 ## Customization
 
 You can modify the Neo4j model classes in `migrate.py` to change the graph structure according to your needs. 
+
+
+
+
+
+<img width="1911" height="1002" alt="image" src="https://github.com/user-attachments/assets/7009f9e4-124c-4ffc-935e-61dc95ba2a50" />
