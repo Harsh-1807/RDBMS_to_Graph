@@ -1,4 +1,4 @@
-# SQL to Neo4j Aura Migration Tool and Graph Explorer
+# SQL to Neo4j Aura Migration Tool and Graph Explorer .
 
 This project consists of two parts:
 
