@@ -6,7 +6,7 @@ This project consists of two parts:
 2. A web application for exploring and visualizing the data in Neo4j Aura
  <img width="512" height="393" alt="ER" src="https://github.com/user-attachments/assets/c36ea96e-aa25-42e1-b965-4e1efe728ad1" />
 
-
+About to be deployed
 ## Part 1: Migration Tool
 
 The migration tool extracts data from a PostgreSQL Northwind database and loads it into Neo4j Aura, maintaining all relationships.
